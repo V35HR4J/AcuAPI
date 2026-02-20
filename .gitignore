@@ -1,0 +1,20 @@
+# Configuration with sensitive data
+config.json
+
+# macOS
+.DS_Store
+
+# Reports
+*.pdf
+*.html
+reports/
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
