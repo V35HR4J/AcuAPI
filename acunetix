@@ -3,8 +3,6 @@
 # AcuAPI - Acunetix CLI Tool v2.0
 # A scalable command-line interface for Acunetix vulnerability scanner
 
-set -e
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/config.json"
 VERSION="2.0.0"
@@ -73,7 +71,7 @@ load_config() {
     log_debug "Loaded config: $API_URL"
 }
 
-# API request helper with better error handling
+# API request helper
 api_request() {
     local method="$1"
     local endpoint="$2"
@@ -86,7 +84,6 @@ api_request() {
     local curl_opts=(
         -s
         -k
-        -w "\n%{http_code}"
         -X "$method"
         -H "X-Auth: $API_KEY"
         -H "Content-Type: application/json"
@@ -97,21 +94,7 @@ api_request() {
         log_debug "Request body: $data"
     fi
     
-    local response
-    response=$(curl "${curl_opts[@]}" "$url")
-    
-    local http_code=$(echo "$response" | tail -n1)
-    local body=$(echo "$response" | sed '$d')
-    
-    log_debug "Response code: $http_code"
-    
-    if [[ "$http_code" -ge 400 ]]; then
-        log_error "API returned $http_code"
-        echo "$body"
-        return 1
-    fi
-    
-    echo "$body"
+    curl "${curl_opts[@]}" "$url"
 }
 
 # Print formatted header (only in pretty mode)
