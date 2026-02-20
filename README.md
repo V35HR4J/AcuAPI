@@ -4,11 +4,13 @@ A powerful command-line interface for [Acunetix](https://www.acunetix.com/) vuln
 
 ## Features
 
-- 🎯 **Target Management** - Add, list, and delete scan targets
-- 🔍 **Scan Control** - Start, stop, pause, resume scans
+- 🎯 **Target Management** - Add, list, delete, and bulk import targets
+- 🔍 **Scan Control** - Start, stop, pause, resume, and watch scans live
 - 📊 **Reports** - Generate and download vulnerability reports
-- 🐛 **Vulnerabilities** - View and analyze discovered vulnerabilities
+- 🐛 **Vulnerabilities** - View details with HTTP request/response, filter by severity
+- 👥 **Groups** - Organize targets, bulk import, scan entire groups, get group vulns
 - ⚡ **Quick Scan** - One-command target addition and scan initiation
+- 📤 **Export** - JSON, CSV, and Markdown output formats
 - 🎨 **Beautiful Output** - Color-coded, formatted terminal output
 
 ## Prerequisites
@@ -135,21 +137,79 @@ To get your API key:
 # List vulnerabilities for a scan
 ./acunetix vulns list <scan_id>
 
-# Get vulnerability details
+# Filter by severity
+./acunetix vulns list <scan_id> critical
+./acunetix vulns list <scan_id> high
+
+# Full details for ALL vulnerabilities (with HTTP req/res)
+./acunetix vulns all <scan_id>
+./acunetix vulns all <scan_id> high
+
+# Detailed view of single vulnerability
+./acunetix vulns show <scan_id> <vuln_id>
+
+# Get raw JSON details
 ./acunetix vulns info <scan_id> <vuln_id>
+
+# Export vulnerabilities
+./acunetix vulns export <scan_id> json findings.json
+./acunetix vulns export <scan_id> csv findings.csv
+./acunetix vulns export <scan_id> markdown report.md
+```
+
+### Groups
+
+Manage target groups for bulk operations:
+
+```bash
+# List all groups
+./acunetix groups list
+
+# Create a new group
+./acunetix groups create "BugBounty" "Bug bounty targets"
+
+# Get group info
+./acunetix groups info <group_id>
+
+# List targets in group
+./acunetix groups targets <group_id>
+
+# Import URLs from file into group
+./acunetix groups import <group_id> urls.txt
+
+# Scan ALL targets in a group
+./acunetix groups scan <group_id>
+./acunetix groups scan <group_id> high  # with profile
+
+# Get vulnerabilities for entire group
+./acunetix groups vulns <group_id>
+./acunetix groups vulns <group_id> critical  # filter by severity
+
+# Full vulnerability details for group
+./acunetix groups vulns-all <group_id>
+./acunetix groups vulns-all <group_id> high
+
+# Delete a group
+./acunetix groups delete <group_id>
+```
+
+**Alternative syntax** - you can also put the group_id first:
+```bash
+./acunetix groups <group_id> info
+./acunetix groups <group_id> targets
+./acunetix groups <group_id> scan
+./acunetix groups <group_id> import urls.txt
+./acunetix groups <group_id> vulns high
 ```
 
 ### Other Commands
 
 ```bash
 # List scan profiles
-./acunetix profiles list
+./acunetix profiles
 
 # List report templates
-./acunetix templates list
-
-# List target groups
-./acunetix groups list
+./acunetix templates
 
 # API info
 ./acunetix info
@@ -158,7 +218,21 @@ To get your API key:
 ./acunetix license
 
 # Dashboard stats
-./acunetix dashboard
+./acunetix stats
+```
+
+### Output Formats
+
+```bash
+# JSON output
+./acunetix -j scans list
+./acunetix --json vulns list <scan_id>
+
+# CSV output
+./acunetix -c targets list
+
+# Save to file
+./acunetix -j -o results.json scans list
 ```
 
 ## Scan Profiles
@@ -211,9 +285,11 @@ To get your API key:
 
 # 3. Monitor progress
 ./acunetix scans status xyz-456-ghi
+./acunetix scans watch xyz-456-ghi  # Live progress
 
 # 4. View vulnerabilities (after scan completes)
 ./acunetix vulns list xyz-456-ghi
+./acunetix vulns all xyz-456-ghi critical  # Full details
 
 # 5. Generate report
 ./acunetix reports generate xyz-456-ghi executive
@@ -221,6 +297,24 @@ To get your API key:
 
 # 6. Download report
 ./acunetix reports download rep-789-jkl security-report.pdf
+```
+
+### Group-Based Workflow
+
+```bash
+# 1. Create a group
+./acunetix groups create "BugBounty" "Q1 targets"
+# Output: Group ID: d9ef3687-42a0-...
+
+# 2. Import targets from file
+./acunetix groups import d9ef3687-... urls.txt
+
+# 3. Scan all targets at once
+./acunetix groups scan d9ef3687-...
+
+# 4. Get all vulnerabilities for the group
+./acunetix groups vulns d9ef3687-... high
+./acunetix -j groups vulns d9ef3687-... > report.json
 ```
 
 ### Quick Scan
