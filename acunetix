@@ -432,10 +432,20 @@ vulns_list() {
     
     local response=$(api_request GET "/scans/$scan_id/results/$session_id/vulnerabilities")
     
-    # Apply severity filter if specified
+    # Apply severity filter if specified (convert text to number)
     if [[ -n "$severity_filter" ]]; then
-        response=$(echo "$response" | jq --arg sev "$severity_filter" '
-            .vulnerabilities |= [.[] | select(.severity | ascii_downcase == ($sev | ascii_downcase))]
+        local sev_num
+        local sev_lower=$(echo "$severity_filter" | tr '[:upper:]' '[:lower:]')
+        case "$sev_lower" in
+            critical|crit|4) sev_num=4 ;;
+            high|3) sev_num=3 ;;
+            medium|med|2) sev_num=2 ;;
+            low|1) sev_num=1 ;;
+            info|0) sev_num=0 ;;
+            *) sev_num="$severity_filter" ;;
+        esac
+        response=$(echo "$response" | jq --argjson sev "$sev_num" '
+            .vulnerabilities |= [.[] | select(.severity == $sev)]
         ')
     fi
     
@@ -571,6 +581,74 @@ vulns_show() {
     fi
     
     echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════════════════════${NC}\n"
+}
+
+# Show all vulnerabilities with full details
+vulns_all() {
+    local scan_id="$1"
+    local severity_filter="${2:-}"
+    
+    [[ -z "$scan_id" ]] && { log_error "Scan ID required"; exit 1; }
+    
+    local scan_response=$(api_request GET "/scans/$scan_id")
+    local session_id=$(echo "$scan_response" | jq -r '.current_session.scan_session_id // empty')
+    local target=$(echo "$scan_response" | jq -r '.target.address // "unknown"')
+    
+    [[ -z "$session_id" ]] && { log_error "No scan session found"; exit 1; }
+    
+    local vulns_response=$(api_request GET "/scans/$scan_id/results/$session_id/vulnerabilities")
+    
+    # Apply severity filter if specified (convert text to number)
+    if [[ -n "$severity_filter" ]]; then
+        local sev_num
+        local sev_lower=$(echo "$severity_filter" | tr '[:upper:]' '[:lower:]')
+        case "$sev_lower" in
+            critical|crit|4) sev_num=4 ;;
+            high|3) sev_num=3 ;;
+            medium|med|2) sev_num=2 ;;
+            low|1) sev_num=1 ;;
+            info|0) sev_num=0 ;;
+            *) sev_num="$severity_filter" ;;
+        esac
+        vulns_response=$(echo "$vulns_response" | jq --argjson sev "$sev_num" '
+            .vulnerabilities |= [.[] | select(.severity == $sev)]
+        ')
+    fi
+    
+    local vuln_ids=$(echo "$vulns_response" | jq -r '.vulnerabilities[].vuln_id')
+    local total=$(echo "$vulns_response" | jq '.vulnerabilities | length')
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        # JSON mode: output array of full vulnerability details
+        echo "["
+        local first=true
+        for vuln_id in $vuln_ids; do
+            local detail=$(api_request GET "/scans/$scan_id/results/$session_id/vulnerabilities/$vuln_id")
+            if [[ "$first" == true ]]; then
+                first=false
+            else
+                echo ","
+            fi
+            echo "$detail"
+        done
+        echo "]"
+    else
+        # Pretty mode: show each vulnerability
+        echo -e "\n${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BLUE}  Full Vulnerability Report: ${YELLOW}$target${NC}"
+        echo -e "${BLUE}  Scan ID: ${NC}$scan_id"
+        echo -e "${BLUE}  Total Vulnerabilities: ${NC}$total"
+        echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}"
+        
+        local count=0
+        for vuln_id in $vuln_ids; do
+            ((count++))
+            echo -e "\n${MAGENTA}[$count/$total]${NC}"
+            vulns_show "$scan_id" "$vuln_id"
+        done
+        
+        echo -e "\n${GREEN}✓ Completed: $total vulnerabilities displayed${NC}\n"
+    fi
 }
 
 # Export vulnerabilities to various formats
@@ -941,6 +1019,7 @@ EOF
     echo ""
     echo -e "  ${YELLOW}vulns${NC}"
     echo "    list <scan_id> [severity]   List vulnerabilities"
+    echo "    all <scan_id> [severity]    Full details for ALL vulns"
     echo "    show <scan_id> <vuln_id>    Detailed view with HTTP req/res"
     echo "    info <scan_id> <vuln_id>    Raw JSON details"
     echo "    export <scan_id> <format> [file]"
@@ -1064,10 +1143,11 @@ main() {
         vulns|vulnerabilities)
             case "$subcommand" in
                 list|ls)    vulns_list "$3" "$4" ;;
+                all)        vulns_all "$3" "$4" ;;
                 info|get)   vulns_info "$3" "$4" ;;
                 show)       vulns_show "$3" "$4" ;;
                 export)     vulns_export "$3" "$4" "$5" ;;
-                *)          echo "Usage: acunetix vulns <list|show|info|export>" ;;
+                *)          echo "Usage: acunetix vulns <list|all|show|info|export>" ;;
             esac
             ;;
         reports)
