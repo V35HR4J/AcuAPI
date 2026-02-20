@@ -950,6 +950,8 @@ templates_list() {
     fi
 }
 
+# ============== GROUPS ==============
+
 groups_list() {
     print_header "Target Groups"
     local response=$(api_request GET "/target_groups")
@@ -957,7 +959,351 @@ groups_list() {
     if [[ "$OUTPUT_FORMAT" == "json" ]]; then
         output "$response"
     else
-        echo "$response" | jq -r '.groups[] | "[\(.group_id)] \(.name)"'
+        echo "$response" | jq -r '.groups[] | "[\(.group_id)] \(.name) (\(.target_count // 0) targets)"'
+    fi
+}
+
+# Create a new group
+groups_create() {
+    local name="$1"
+    local description="${2:-}"
+    
+    [[ -z "$name" ]] && { log_error "Group name required"; exit 1; }
+    
+    print_header "Creating Group"
+    
+    local data=$(jq -n --arg name "$name" --arg desc "$description" '{name: $name, description: $desc}')
+    local response=$(api_request POST "/target_groups" "$data")
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        output "$response"
+    else
+        local group_id=$(echo "$response" | jq -r '.group_id // empty')
+        if [[ -n "$group_id" ]]; then
+            log_success "Group created: $group_id"
+            echo -e "Name: $name"
+        else
+            log_error "Failed to create group"
+            echo "$response" | jq .
+        fi
+    fi
+}
+
+# Get group info
+groups_info() {
+    local group_id="$1"
+    [[ -z "$group_id" ]] && { log_error "Group ID required"; exit 1; }
+    
+    print_header "Group Information"
+    local response=$(api_request GET "/target_groups/$group_id")
+    output "$response"
+}
+
+# Delete a group
+groups_delete() {
+    local group_id="$1"
+    [[ -z "$group_id" ]] && { log_error "Group ID required"; exit 1; }
+    
+    api_request DELETE "/target_groups/$group_id" > /dev/null
+    log_success "Group deleted: $group_id"
+}
+
+# List targets in a group
+groups_targets() {
+    local group_id="$1"
+    [[ -z "$group_id" ]] && { log_error "Group ID required"; exit 1; }
+    
+    print_header "Targets in Group"
+    local response=$(api_request GET "/targets?group_id=$group_id")
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        output "$response"
+    else
+        echo "$response" | jq -r '.targets[] | "[\(.target_id)] \(.address)"'
+        local count=$(echo "$response" | jq '.targets | length')
+        echo -e "\n${GREEN}Total: $count targets${NC}"
+    fi
+}
+
+# Scan all targets in a group
+groups_scan() {
+    local group_id="$1"
+    local profile="${2:-full}"
+    
+    [[ -z "$group_id" ]] && { log_error "Group ID required"; exit 1; }
+    
+    print_header "Scanning Group"
+    
+    # Get group info
+    local group_info=$(api_request GET "/target_groups/$group_id")
+    local group_name=$(echo "$group_info" | jq -r '.name // "Unknown"')
+    
+    # Get all targets in the group
+    local targets_response=$(api_request GET "/targets?group_id=$group_id")
+    local target_ids=$(echo "$targets_response" | jq -r '.targets[].target_id')
+    local total=$(echo "$targets_response" | jq '.targets | length')
+    
+    if [[ "$total" -eq 0 ]]; then
+        log_warn "No targets in group: $group_name"
+        return
+    fi
+    
+    log_info "Group: $group_name ($total targets)"
+    
+    local profile_id=$(get_profile_id "$profile")
+    local count=0
+    local scan_ids=()
+    
+    for target_id in $target_ids; do
+        ((count++))
+        local target_url=$(echo "$targets_response" | jq -r --arg tid "$target_id" '.targets[] | select(.target_id == $tid) | .address')
+        
+        local scan_data=$(jq -n \
+            --arg tid "$target_id" \
+            --arg pid "$profile_id" \
+            '{target_id: $tid, profile_id: $pid, schedule: {disable: false, start_date: null, time_sensitive: false}}')
+        
+        local scan_response=$(api_request POST "/scans" "$scan_data")
+        local scan_id=$(echo "$scan_response" | jq -r '.scan_id // empty')
+        
+        if [[ -n "$scan_id" ]]; then
+            scan_ids+=("$scan_id")
+            log_success "[$count/$total] Started: $target_url -> $scan_id"
+        else
+            log_error "[$count/$total] Failed: $target_url"
+        fi
+    done
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        printf '%s\n' "${scan_ids[@]}" | jq -R . | jq -s '{group_id: "'"$group_id"'", group_name: "'"$group_name"'", scans: .}'
+    else
+        echo -e "\n${GREEN}✓ Started ${#scan_ids[@]}/$total scans${NC}"
+        echo -e "\nScan IDs:"
+        printf '  %s\n' "${scan_ids[@]}"
+        echo -e "\nUse '${YELLOW}acunetix scans list${NC}' to monitor all scans"
+    fi
+}
+
+# Import targets from file into a group
+groups_import() {
+    local group_id="$1"
+    local file="$2"
+    
+    [[ -z "$group_id" ]] && { log_error "Group ID required"; exit 1; }
+    [[ -z "$file" || ! -f "$file" ]] && { log_error "File required"; exit 1; }
+    
+    # Get group info
+    local group_info=$(api_request GET "/target_groups/$group_id")
+    local group_name=$(echo "$group_info" | jq -r '.name // "Unknown"')
+    
+    print_header "Importing to Group: $group_name"
+    
+    local count=0
+    local failed=0
+    local target_ids=()
+    
+    while IFS= read -r url || [[ -n "$url" ]]; do
+        [[ -z "$url" || "$url" =~ ^# ]] && continue
+        
+        local data=$(jq -n --arg addr "$url" --arg gid "$group_id" '{address: $addr, criticality: 10, group_id: $gid}')
+        local response=$(api_request POST "/targets" "$data")
+        local target_id=$(echo "$response" | jq -r '.target_id // empty')
+        
+        if [[ -n "$target_id" ]]; then
+            ((count++))
+            target_ids+=("$target_id")
+            log_success "Added: $url"
+        else
+            ((failed++))
+            log_error "Failed: $url"
+        fi
+    done < "$file"
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        printf '%s\n' "${target_ids[@]}" | jq -R . | jq -s '{group_id: "'"$group_id"'", added: length, failed: '"$failed"', target_ids: .}'
+    else
+        log_info "Import complete: $count added, $failed failed"
+    fi
+}
+
+# Get all vulnerabilities for a group
+groups_vulns() {
+    local group_id="$1"
+    local severity_filter="${2:-}"
+    
+    [[ -z "$group_id" ]] && { log_error "Group ID required"; exit 1; }
+    
+    # Get group info
+    local group_info=$(api_request GET "/target_groups/$group_id")
+    local group_name=$(echo "$group_info" | jq -r '.name // "Unknown"')
+    
+    # Get all targets in the group
+    local targets_response=$(api_request GET "/targets?group_id=$group_id")
+    local targets=$(echo "$targets_response" | jq -c '.targets[]')
+    local target_count=$(echo "$targets_response" | jq '.targets | length')
+    
+    if [[ "$target_count" -eq 0 ]]; then
+        log_warn "No targets in group: $group_name"
+        return
+    fi
+    
+    # Severity filter number
+    local sev_num=""
+    if [[ -n "$severity_filter" ]]; then
+        local sev_lower=$(echo "$severity_filter" | tr '[:upper:]' '[:lower:]')
+        case "$sev_lower" in
+            critical|crit|4) sev_num=4 ;;
+            high|3) sev_num=3 ;;
+            medium|med|2) sev_num=2 ;;
+            low|1) sev_num=1 ;;
+            info|0) sev_num=0 ;;
+        esac
+    fi
+    
+    if [[ "$OUTPUT_FORMAT" != "json" ]]; then
+        echo -e "\n${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BLUE}  Vulnerabilities for Group: ${YELLOW}$group_name${NC}"
+        echo -e "${BLUE}  Targets: ${NC}$target_count"
+        [[ -n "$severity_filter" ]] && echo -e "${BLUE}  Filter: ${NC}$severity_filter"
+        echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}"
+    fi
+    
+    local all_vulns="[]"
+    local total_vulns=0
+    
+    while IFS= read -r target; do
+        [[ -z "$target" ]] && continue
+        
+        local target_id=$(echo "$target" | jq -r '.target_id')
+        local target_url=$(echo "$target" | jq -r '.address')
+        local last_scan_id=$(echo "$target" | jq -r '.last_scan_id // empty')
+        local session_id=$(echo "$target" | jq -r '.last_scan_session_id // empty')
+        
+        if [[ -z "$last_scan_id" || -z "$session_id" || "$last_scan_id" == "null" ]]; then
+            [[ "$OUTPUT_FORMAT" != "json" ]] && log_warn "No scan for: $target_url"
+            continue
+        fi
+        
+        # Get vulnerabilities for this target's last scan
+        local vulns_response=$(api_request GET "/scans/$last_scan_id/results/$session_id/vulnerabilities")
+        local vulns=$(echo "$vulns_response" | jq '.vulnerabilities // []')
+        
+        # Apply severity filter
+        if [[ -n "$sev_num" ]]; then
+            vulns=$(echo "$vulns" | jq --argjson sev "$sev_num" '[.[] | select(.severity == $sev)]')
+        fi
+        
+        # Add target info to each vuln
+        vulns=$(echo "$vulns" | jq --arg url "$target_url" --arg tid "$target_id" '[.[] | . + {target_url: $url, target_id: $tid}]')
+        
+        local vuln_count=$(echo "$vulns" | jq 'length')
+        ((total_vulns += vuln_count))
+        
+        # Merge into all_vulns
+        all_vulns=$(echo "$all_vulns $vulns" | jq -s 'add')
+        
+        if [[ "$OUTPUT_FORMAT" != "json" && "$vuln_count" -gt 0 ]]; then
+            echo -e "\n${YELLOW}$target_url${NC} - $vuln_count vulnerabilities"
+            echo "$vulns" | jq -r '.[] | "  [\(if .severity == 4 then "CRIT" elif .severity == 3 then "HIGH" elif .severity == 2 then "MED" elif .severity == 1 then "LOW" else "INFO" end)] \(.vt_name)"'
+        fi
+    done <<< "$targets"
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        jq -n \
+            --arg gid "$group_id" \
+            --arg gname "$group_name" \
+            --argjson vulns "$all_vulns" \
+            --argjson count "$total_vulns" \
+            '{group_id: $gid, group_name: $gname, total_vulnerabilities: $count, vulnerabilities: $vulns}'
+    else
+        echo -e "\n${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}"
+        echo -e "${GREEN}Total: $total_vulns vulnerabilities${NC}"
+        echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}\n"
+    fi
+}
+
+# Get full vulnerability details for entire group
+groups_vulns_all() {
+    local group_id="$1"
+    local severity_filter="${2:-}"
+    
+    [[ -z "$group_id" ]] && { log_error "Group ID required"; exit 1; }
+    
+    # Get group info
+    local group_info=$(api_request GET "/target_groups/$group_id")
+    local group_name=$(echo "$group_info" | jq -r '.name // "Unknown"')
+    
+    # Get all targets in the group
+    local targets_response=$(api_request GET "/targets?group_id=$group_id")
+    local target_count=$(echo "$targets_response" | jq '.targets | length')
+    
+    if [[ "$target_count" -eq 0 ]]; then
+        log_warn "No targets in group: $group_name"
+        return
+    fi
+    
+    # Severity filter
+    local sev_num=""
+    if [[ -n "$severity_filter" ]]; then
+        local sev_lower=$(echo "$severity_filter" | tr '[:upper:]' '[:lower:]')
+        case "$sev_lower" in
+            critical|crit|4) sev_num=4 ;;
+            high|3) sev_num=3 ;;
+            medium|med|2) sev_num=2 ;;
+            low|1) sev_num=1 ;;
+            info|0) sev_num=0 ;;
+        esac
+    fi
+    
+    echo -e "\n${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}  Full Vulnerability Report for Group: ${YELLOW}$group_name${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════════════════════════${NC}"
+    
+    local all_details="[]"
+    
+    while IFS= read -r target; do
+        [[ -z "$target" ]] && continue
+        
+        local target_id=$(echo "$target" | jq -r '.target_id')
+        local target_url=$(echo "$target" | jq -r '.address')
+        local last_scan_id=$(echo "$target" | jq -r '.last_scan_id // empty')
+        local session_id=$(echo "$target" | jq -r '.last_scan_session_id // empty')
+        
+        if [[ -z "$last_scan_id" || -z "$session_id" || "$last_scan_id" == "null" ]]; then
+            continue
+        fi
+        
+        # Get vulnerabilities
+        local vulns_response=$(api_request GET "/scans/$last_scan_id/results/$session_id/vulnerabilities")
+        local vuln_ids=$(echo "$vulns_response" | jq -r '.vulnerabilities[].vuln_id')
+        
+        # Apply severity filter
+        if [[ -n "$sev_num" ]]; then
+            vuln_ids=$(echo "$vulns_response" | jq -r --argjson sev "$sev_num" '.vulnerabilities[] | select(.severity == $sev) | .vuln_id')
+        fi
+        
+        [[ -z "$vuln_ids" ]] && continue
+        
+        echo -e "\n${MAGENTA}━━━ $target_url ━━━${NC}"
+        
+        for vuln_id in $vuln_ids; do
+            local detail=$(api_request GET "/scans/$last_scan_id/results/$session_id/vulnerabilities/$vuln_id")
+            
+            if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+                detail=$(echo "$detail" | jq --arg url "$target_url" '. + {target_url: $url}')
+                all_details=$(echo "$all_details [$detail]" | jq -s 'add')
+            else
+                vulns_show "$last_scan_id" "$vuln_id"
+            fi
+        done
+    done < <(echo "$targets_response" | jq -c '.targets[]')
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        jq -n \
+            --arg gid "$group_id" \
+            --arg gname "$group_name" \
+            --argjson vulns "$all_details" \
+            '{group_id: $gid, group_name: $gname, vulnerabilities: $vulns}'
     fi
 }
 
@@ -1031,6 +1377,17 @@ EOF
     echo "    download <id> [file]        Download report"
     echo "    delete <id>                 Delete report"
     echo ""
+    echo -e "  ${YELLOW}groups${NC}"
+    echo "    list                        List all groups"
+    echo "    create <name> [desc]        Create a new group"
+    echo "    info <group_id>             Group details"
+    echo "    targets <group_id>          List targets in group"
+    echo "    import <group_id> <file>    Import URLs into group"
+    echo "    scan <group_id> [profile]   Scan ALL targets in group"
+    echo "    vulns <group_id> [sev]      List vulns for group"
+    echo "    vulns-all <group_id> [sev]  Full details for group vulns"
+    echo "    delete <group_id>           Delete group"
+    echo ""
     echo -e "  ${YELLOW}quick${NC} <url> [profile] [-w]   Add target & scan"
     echo -e "  ${YELLOW}stats${NC}                        Show statistics"
     echo -e "  ${YELLOW}api${NC} <METHOD> <endpoint> [data]  Raw API access"
@@ -1059,6 +1416,12 @@ EOF
     echo ""
     echo "  # Bulk import targets"
     echo "  acunetix targets import urls.txt"
+    echo ""
+    echo "  # Group workflow"
+    echo "  acunetix groups create BugBounty"
+    echo "  acunetix groups import <group_id> urls.txt"
+    echo "  acunetix groups scan <group_id>"
+    echo "  acunetix groups vulns <group_id> high"
     echo ""
     echo "  # Raw API access"
     echo "  acunetix api GET /me"
@@ -1175,7 +1538,18 @@ main() {
             templates_list
             ;;
         groups)
-            groups_list
+            case "$subcommand" in
+                list|ls|"")  groups_list ;;
+                create)      groups_create "$3" "$4" ;;
+                info|get)    groups_info "$3" ;;
+                delete|rm)   groups_delete "$3" ;;
+                targets)     groups_targets "$3" ;;
+                scan)        groups_scan "$3" "$4" ;;
+                import)      groups_import "$3" "$4" ;;
+                vulns)       groups_vulns "$3" "$4" ;;
+                vulns-all)   groups_vulns_all "$3" "$4" ;;
+                *)           echo "Usage: acunetix groups <list|create|info|targets|scan|import|vulns|vulns-all|delete>" ;;
+            esac
             ;;
         info)
             info
