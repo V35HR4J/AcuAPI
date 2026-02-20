@@ -478,6 +478,101 @@ vulns_info() {
     output "$response"
 }
 
+# Show detailed vulnerability with formatted HTTP request/response
+vulns_show() {
+    local scan_id="$1"
+    local vuln_id="$2"
+    
+    [[ -z "$scan_id" || -z "$vuln_id" ]] && { log_error "Scan ID and Vuln ID required"; exit 1; }
+    
+    local scan_response=$(api_request GET "/scans/$scan_id")
+    local session_id=$(echo "$scan_response" | jq -r '.current_session.scan_session_id // empty')
+    
+    local response=$(api_request GET "/scans/$scan_id/results/$session_id/vulnerabilities/$vuln_id")
+    
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        output "$response"
+        return
+    fi
+    
+    # Extract fields
+    local name=$(echo "$response" | jq -r '.vt_name // "Unknown"')
+    local severity=$(echo "$response" | jq -r '.severity // 0')
+    local url=$(echo "$response" | jq -r '.affects_url // "N/A"')
+    local param=$(echo "$response" | jq -r '.affects_detail // "N/A"')
+    local cvss=$(echo "$response" | jq -r '.cvss_score // "N/A"')
+    local cvss3=$(echo "$response" | jq -r '.cvss3 // "N/A"')
+    local confidence=$(echo "$response" | jq -r '.confidence // "N/A"')
+    local status=$(echo "$response" | jq -r '.status // "N/A"')
+    local description=$(echo "$response" | jq -r '.description // "N/A"' | sed 's/<[^>]*>//g')
+    local details=$(echo "$response" | jq -r '.details // ""' | sed 's/<[^>]*>//g; s/&gt;/>/g; s/&lt;/</g; s/&#x27;/'\''/g; s/&amp;/\&/g')
+    local impact=$(echo "$response" | jq -r '.impact // "N/A"')
+    local recommendation=$(echo "$response" | jq -r '.recommendation // "N/A"')
+    local request=$(echo "$response" | jq -r '.request // ""')
+    local tags=$(echo "$response" | jq -r '.tags // [] | join(", ")')
+    
+    # Severity color and label
+    local sev_color sev_label
+    case "$severity" in
+        4) sev_color="${RED}"; sev_label="CRITICAL" ;;
+        3) sev_color="${YELLOW}"; sev_label="HIGH" ;;
+        2) sev_color="${BLUE}"; sev_label="MEDIUM" ;;
+        1) sev_color="${NC}"; sev_label="LOW" ;;
+        *) sev_color="${CYAN}"; sev_label="INFO" ;;
+    esac
+    
+    # Print formatted output
+    echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${sev_color}[${sev_label}]${NC} ${YELLOW}${name}${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════════════════════${NC}\n"
+    
+    echo -e "${GREEN}BASIC INFO${NC}"
+    echo -e "────────────────────────────────────────────────────────────────────"
+    echo -e "  URL:        $url"
+    echo -e "  Parameter:  $param"
+    echo -e "  CVSS Score: $cvss"
+    echo -e "  CVSS3:      $cvss3"
+    echo -e "  Confidence: $confidence%"
+    echo -e "  Status:     $status"
+    echo -e "  Tags:       $tags"
+    
+    echo -e "\n${GREEN}DESCRIPTION${NC}"
+    echo -e "────────────────────────────────────────────────────────────────────"
+    echo -e "$description" | fold -s -w 76 | sed 's/^/  /'
+    
+    if [[ -n "$details" && "$details" != "null" ]]; then
+        echo -e "\n${GREEN}DETAILS${NC}"
+        echo -e "────────────────────────────────────────────────────────────────────"
+        echo -e "$details" | fold -s -w 76 | sed 's/^/  /'
+    fi
+    
+    echo -e "\n${GREEN}IMPACT${NC}"
+    echo -e "────────────────────────────────────────────────────────────────────"
+    echo -e "$impact" | fold -s -w 76 | sed 's/^/  /'
+    
+    echo -e "\n${GREEN}RECOMMENDATION${NC}"
+    echo -e "────────────────────────────────────────────────────────────────────"
+    echo -e "$recommendation" | fold -s -w 76 | sed 's/^/  /'
+    
+    if [[ -n "$request" && "$request" != "null" ]]; then
+        echo -e "\n${GREEN}HTTP REQUEST${NC}"
+        echo -e "────────────────────────────────────────────────────────────────────"
+        echo -e "${CYAN}"
+        echo "$request" | sed 's/\\r\\n/\n/g; s/\\n/\n/g' | sed 's/^/  /'
+        echo -e "${NC}"
+    fi
+    
+    # Print references
+    local refs=$(echo "$response" | jq -r '.references // []')
+    if [[ "$refs" != "[]" && "$refs" != "null" ]]; then
+        echo -e "\n${GREEN}REFERENCES${NC}"
+        echo -e "────────────────────────────────────────────────────────────────────"
+        echo "$response" | jq -r '.references[] | "  - \(.rel): \(.href)"'
+    fi
+    
+    echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════════════════════${NC}\n"
+}
+
 # Export vulnerabilities to various formats
 vulns_export() {
     local scan_id="$1"
@@ -846,7 +941,8 @@ EOF
     echo ""
     echo -e "  ${YELLOW}vulns${NC}"
     echo "    list <scan_id> [severity]   List vulnerabilities"
-    echo "    info <scan_id> <vuln_id>    Vulnerability details"
+    echo "    show <scan_id> <vuln_id>    Detailed view with HTTP req/res"
+    echo "    info <scan_id> <vuln_id>    Raw JSON details"
     echo "    export <scan_id> <format> [file]"
     echo "                                Export (json|csv|markdown)"
     echo ""
@@ -969,8 +1065,9 @@ main() {
             case "$subcommand" in
                 list|ls)    vulns_list "$3" "$4" ;;
                 info|get)   vulns_info "$3" "$4" ;;
+                show)       vulns_show "$3" "$4" ;;
                 export)     vulns_export "$3" "$4" "$5" ;;
-                *)          echo "Usage: acunetix vulns <list|info|export>" ;;
+                *)          echo "Usage: acunetix vulns <list|show|info|export>" ;;
             esac
             ;;
         reports)
